@@ -13,7 +13,7 @@ import sqlite3
 
 class StampScraper:
     def __init__(self, db_path: str = "stamps.db", headless: bool = True):
-        self.base_url = "https://www.mysticstamp.com/foreign-stamps/?tab=products&productsPage={}"
+        self.start_url = "https://www.mysticstamp.com/foreign-stamps/?tab=products#/pageSize:96"
         self.db_path = db_path
         self.scraped_ids: Set[str] = set()
         self.headless = headless
@@ -56,6 +56,26 @@ class StampScraper:
         """Close the WebDriver"""
         if self.driver:
             self.driver.quit()
+
+    def close_popups(self):
+        """Close modal popups and accept cookies"""
+        # Close modal popup if present
+        try:
+            close_button = self.driver.find_element(By.CSS_SELECTOR, 'button.klaviyo-close-form')
+            close_button.click()
+            print("  Closed modal popup")
+            time.sleep(1)
+        except:
+            pass  # No modal present
+
+        # Accept cookies if present
+        try:
+            cookie_button = self.driver.find_element(By.ID, 'onetrust-accept-btn-handler')
+            cookie_button.click()
+            print("  Accepted cookies")
+            time.sleep(1)
+        except:
+            pass  # No cookie popup present
 
     def is_valid_stamp_number(self, stamp_number_text: str) -> bool:
         """Check if stamp number contains only a single number (no ranges, slashes, etc)"""
@@ -218,13 +238,11 @@ class StampScraper:
 
         print(f"  → Saved to {json_file} (total: {len(existing_data)} stamps)")
 
-    def scrape_page(self, page_num: int) -> List[Dict]:
-        """Scrape a single page and return list of stamp data"""
-        url = self.base_url.format(page_num) + "#/pageSize:96"
-        print(f"Scraping page {page_num}...")
-
+    def scrape_current_listings(self) -> List[Dict]:
+        """Scrape currently visible listings and return new stamp data"""
         try:
-            self.driver.get(url)
+            # Close any popups that might have appeared
+            self.close_popups()
 
             # Wait for listings to load
             wait = WebDriverWait(self.driver, 20)
@@ -239,11 +257,11 @@ class StampScraper:
             time.sleep(2)
 
             # Give extra time for all elements to load
-            time.sleep(3)
+            time.sleep(2)
 
             # Find all stamp listings
             listings = self.driver.find_elements(By.CSS_SELECTOR, 'li.ss__result')
-            print(f"Found {len(listings)} total listings on page {page_num}")
+            print(f"  Found {len(listings)} total listings on page")
 
             stamps = []
             for listing in listings:
@@ -254,53 +272,108 @@ class StampScraper:
             return stamps
 
         except Exception as e:
-            print(f"Error scraping page {page_num}: {e}")
+            print(f"  Error scraping listings: {e}")
             return []
 
-    def scrape_all(self, delay: float = 2.0, max_pages: Optional[int] = None):
+    def click_show_more(self) -> bool:
+        """Click the Show More button. Returns True if successful, False if not found."""
+        try:
+            # Check for popups before clicking
+            self.close_popups()
+
+            # Scroll to bottom where button is located
+            self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(3)
+
+            # Wait for Show More button to be present and clickable
+            wait = WebDriverWait(self.driver, 10)
+            show_more_button = wait.until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, 'a.button.button--transparent'))
+            )
+
+            print("  Clicking 'Show More' button...")
+            # Use JavaScript click as backup
+            self.driver.execute_script("arguments[0].scrollIntoView(true);", show_more_button)
+            time.sleep(1)
+            show_more_button.click()
+
+            # Wait for new items to load
+            time.sleep(4)
+
+            # Check for popups after clicking (modal might appear)
+            self.close_popups()
+
+            return True
+
+        except Exception as e:
+            print(f"  Show More button not found or not clickable")
+            return False
+
+    def scrape_all(self, delay: float = 2.0, max_clicks: Optional[int] = None):
         """
-        Scrape all pages until no new data is found
+        Scrape all listings by clicking Show More button
 
         Args:
-            delay: Delay between requests in seconds
-            max_pages: Maximum number of pages to scrape (None for unlimited)
+            delay: Delay between clicks in seconds
+            max_clicks: Maximum number of Show More clicks (None for unlimited)
         """
         self.init_driver()
 
         try:
-            page_num = 1
-            consecutive_empty_pages = 0
+            # Navigate to starting URL
+            print(f"Loading: {self.start_url}")
+            self.driver.get(self.start_url)
+            time.sleep(3)
+
+            # Close popups
+            print("\nChecking for popups...")
+            self.close_popups()
+            time.sleep(2)
+
+            click_count = 0
             total_scraped = 0
+            consecutive_no_new = 0
 
             while True:
-                if max_pages and page_num > max_pages:
-                    print(f"Reached maximum page limit: {max_pages}")
-                    break
+                print(f"\n--- Scrape iteration {click_count + 1} ---")
 
-                stamps = self.scrape_page(page_num)
+                # Scrape current listings
+                stamps = self.scrape_current_listings()
 
                 if stamps:
-                    print(f"Found {len(stamps)} valid stamps on page {page_num}")
+                    print(f"  ✓ Found {len(stamps)} new valid stamps")
                     self.save_to_database(stamps)
                     self.save_to_json_incremental(stamps)
                     total_scraped += len(stamps)
-                    consecutive_empty_pages = 0
+                    consecutive_no_new = 0
                 else:
-                    consecutive_empty_pages += 1
-                    print(f"No new valid stamps found on page {page_num}")
+                    consecutive_no_new += 1
+                    print(f"  ✗ No new valid stamps")
 
-                # Stop if we've had 3 consecutive pages with no new data
-                if consecutive_empty_pages >= 3:
-                    print("No new data found in last 3 pages. Stopping.")
+                # Stop if no new data for 3 iterations
+                if consecutive_no_new >= 3:
+                    print("\nNo new data in last 3 iterations. Stopping.")
                     break
 
-                page_num += 1
+                # Check if we've reached max clicks
+                if max_clicks and click_count >= max_clicks:
+                    print(f"\nReached maximum clicks: {max_clicks}")
+                    break
 
-                # Delay between requests
+                # Click Show More button
+                if not self.click_show_more():
+                    print("\nShow More button not available. Reached end of listings.")
+                    break
+
+                click_count += 1
                 time.sleep(delay)
 
-            print(f"\nScraping complete! Total stamps scraped: {total_scraped}")
+            print(f"\n{'='*60}")
+            print(f"Scraping complete!")
+            print(f"Total Show More clicks: {click_count}")
+            print(f"Total stamps scraped: {total_scraped}")
             print(f"Database location: {self.db_path}")
+            print(f"{'='*60}")
 
         finally:
             self.close_driver()
@@ -326,8 +399,8 @@ class StampScraper:
 
 
 if __name__ == "__main__":
-    # Initialize scraper (headless=False to see browser window)
-    scraper = StampScraper(db_path="stamps.db", headless=True)
+    # Initialize scraper (headless=False to see browser window for debugging)
+    scraper = StampScraper(db_path="stamps.db", headless=False)
 
     # Scrape all pages with 2 second delay between requests
     scraper.scrape_all(delay=2.0)
