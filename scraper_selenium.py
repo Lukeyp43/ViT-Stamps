@@ -399,8 +399,8 @@ class StampScraper:
 
 
 if __name__ == "__main__":
-    # Initialize scraper (headless=False to see browser window for debugging)
-    scraper = StampScraper(db_path="stamps.db", headless=False)
+    # Initialize scraper (headless=True to run in background)
+    scraper = StampScraper(db_path="stamps.db", headless=True)
 
     # Scrape all pages with 2 second delay between requests
     scraper.scrape_all(delay=2.0)
